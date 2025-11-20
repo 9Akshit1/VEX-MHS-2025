@@ -1,0 +1,528 @@
+#include "main.h"
+#include "globals.hpp"
+#include "posTracking.hpp"
+#include "pid.hpp"
+#include <algorithm>
+#include <cmath>
+
+// Global PID controllers for autonomous
+PID drivePID;
+PID strafePID;
+PID turnPID;
+PID pointTurnPIDController;
+
+// Ball counting state
+int ballsTaken = 0;
+int ballsShot = 0;
+bool bottomSensorCovered = true;
+bool topSensorCovered = true;
+bool ballCountingActive = false;
+
+/**
+ * Ball counting task - runs in background during autonomous
+ * Tracks balls entering/leaving the robot using line sensors
+ */
+void ballCountingTask(void* param) {
+    while (true) {
+        if (ballCountingActive) {
+            pros::lcd::set_text(5, "Balls Shot: " + std::to_string(ballsShot));
+            pros::lcd::set_text(6, "Balls Taken: " + std::to_string(ballsTaken));
+
+            // Detect ball entering (bottom sensor)
+            if (line_tracker1.get_value() >= INDEX_THRESHOLD && bottomSensorCovered) {
+                bottomSensorCovered = false;
+            } else if (line_tracker1.get_value() < INDEX_THRESHOLD && !bottomSensorCovered) {
+                ballsTaken++;
+                bottomSensorCovered = true;
+            }
+
+            // Detect ball exiting (top sensor)
+            if (line_tracker2.get_value() >= INDEX_THRESHOLD && topSensorCovered) {
+                ballsShot++;
+                topSensorCovered = false;
+            } else if (line_tracker2.get_value() < INDEX_THRESHOLD && !topSensorCovered) {
+                topSensorCovered = true;
+            }
+        }
+        pros::delay(10);
+    }
+}
+
+/**
+ * Deploy mechanism at start of autonomous
+ */
+void deploy() {
+    leftIntake.move_velocity(-200);
+    rightIntake.move_velocity(200);
+    indexer.move_velocity(200);
+    pros::delay(250);
+    indexer.move_velocity(0);
+    pros::delay(250);
+    leftIntake.move_velocity(0);
+    rightIntake.move_velocity(0);
+}
+
+/**
+ * Ball distribution system - manages intake and shooting
+ * 
+ * @param ballsToShoot Number of balls to shoot
+ * @param ballsToGrab Number of balls to intake
+ */
+void ballDistribution(int ballsToShoot, int ballsToGrab) {
+    ballsShot = 0;
+    ballsTaken = 0;
+
+    // Initialize sensor states
+    bottomSensorCovered = (line_tracker1.get_value() < INDEX_THRESHOLD);
+    topSensorCovered = true;
+
+    // Pre-index if needed
+    uint32_t indexStartTime = pros::millis();
+    while (line_tracker2.get_value() >= INDEX_THRESHOLD && (pros::millis() - indexStartTime) < 1800) {
+        indexer.move_velocity(-200);
+        shooter.move_velocity(190);
+    }
+
+    // Start ball counting
+    ballCountingActive = true;
+
+    // Run intake/shooter systems
+    indexer.move_velocity(-110);
+    leftIntake.move_velocity(-200);
+    rightIntake.move_velocity(200);
+    shooter.move_velocity(190);
+
+    // Wait until goals met
+    while (true) {
+        if (ballsTaken >= ballsToGrab && ballsShot >= ballsToShoot) {
+            break;
+        } else if (ballsTaken >= ballsToGrab) {
+            // Stop intake
+            indexer.move_velocity(0);
+            leftIntake.move_velocity(0);
+            rightIntake.move_velocity(0);
+        } else if (ballsShot >= ballsToShoot) {
+            // Stop shooter
+            shooter.move_velocity(0);
+            shooter.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+        }
+        pros::delay(10);
+    }
+
+    // Stop everything
+    indexer.move_velocity(0);
+    indexer.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    leftIntake.move_velocity(0);
+    rightIntake.move_velocity(0);
+    shooter.move_velocity(0);
+    shooter.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+
+    ballCountingActive = false;
+}
+
+/**
+ * Translation PID - Move robot to target position while maintaining heading
+ * 
+ * @param targetX Target X coordinate (inches)
+ * @param targetY Target Y coordinate (inches)
+ * @param targetHeading Target heading angle (radians)
+ * @param timeout Maximum time allowed (ms)
+ * @param runIntake Whether to run intake during movement
+ * @param maxVoltage Maximum motor voltage (0-12000)
+ * @return Success status
+ */
+bool translationPID(
+    long double targetX,
+    long double targetY,
+    long double targetHeading,
+    uint32_t timeout,
+    bool runIntake = false,
+    int maxVoltage = 12000
+) {
+    if (!ODOMETRY_ENABLED) {
+        pros::lcd::set_text(1, "Error: Odometry required for autonomous");
+        return false;
+    }
+
+    uint32_t startTime = pros::millis();
+    
+    // Reset PID controllers
+    drivePID.reset();
+    strafePID.reset();
+    turnPID.reset();
+
+    while (true) {
+        uint32_t currentTime = pros::millis() - startTime;
+
+        // Get current position (thread-safe)
+        odom_mutex.take(TIMEOUT_MAX);
+        long double currentX = globalX;
+        long double currentY = globalY;
+        long double currentAngle = globalAngle;
+        odom_mutex.give();
+
+        // Calculate error vector
+        long double deltaX = targetX - currentX;
+        long double deltaY = targetY - currentY;
+        long double distance = std::sqrt(deltaX * deltaX + deltaY * deltaY);
+
+        // Transform error to robot-relative coordinates
+        long double errorForward = deltaY * std::cos(currentAngle) + deltaX * std::sin(currentAngle);
+        long double errorStrafe = deltaX * std::cos(currentAngle) - deltaY * std::sin(currentAngle);
+
+        // Calculate PID outputs
+        long double forwardPower = drivePID.update(0, -errorForward, 1000);
+        long double strafePower = strafePID.update(0, -errorStrafe, 1000);
+        long double turnPower = turnPID.update(targetHeading, currentAngle, 0.1);
+
+        // Apply acceleration scaling
+        long double accelScale = 1.0;
+        if (currentTime < 500) { // 500ms acceleration time
+            accelScale = std::sqrt(static_cast<double>(currentTime) / 500.0);
+        }
+
+        // Calculate wheel powers for X-drive
+        long double leftFrontPower = (forwardPower + strafePower + turnPower) * accelScale;
+        long double leftBackPower = (forwardPower - strafePower + turnPower) * accelScale;
+        long double rightFrontPower = (forwardPower - strafePower - turnPower) * accelScale;
+        long double rightBackPower = (forwardPower + strafePower - turnPower) * accelScale;
+
+        // Scale to max voltage
+        long double maxPower = std::max({
+            std::abs(leftFrontPower),
+            std::abs(leftBackPower),
+            std::abs(rightFrontPower),
+            std::abs(rightBackPower)
+        });
+
+        if (maxPower > maxVoltage) {
+            long double scale = maxVoltage / maxPower;
+            leftFrontPower *= scale;
+            leftBackPower *= scale;
+            rightFrontPower *= scale;
+            rightBackPower *= scale;
+        }
+
+        // Apply to motors
+        leftFront.move_voltage(leftFrontPower);
+        leftBack.move_voltage(leftBackPower);
+        rightFront.move_voltage(rightFrontPower);
+        rightBack.move_voltage(rightBackPower);
+
+        // Intake control
+        if (runIntake) {
+            leftIntake.move_velocity(-200);
+            rightIntake.move_velocity(200);
+        }
+
+        // Check exit conditions
+        if (distance < 2.0) { // Within 2 inches
+            break;
+        }
+
+        if (currentTime >= timeout) {
+            pros::lcd::set_text(1, "Translation timeout");
+            break;
+        }
+
+        pros::delay(20);
+    }
+
+    // Stop motors
+    leftFront.move_velocity(0);
+    leftBack.move_velocity(0);
+    rightFront.move_velocity(0);
+    rightBack.move_velocity(0);
+    leftFront.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    leftBack.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    rightFront.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    rightBack.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+
+    if (runIntake) {
+        leftIntake.move_velocity(0);
+        rightIntake.move_velocity(0);
+    }
+
+    return true;
+}
+
+/**
+ * Point turn PID - Rotate to target angle
+ * 
+ * @param targetAngle Target heading (radians)
+ * @param timeout Maximum time allowed (ms)
+ * @return Success status
+ */
+bool pointTurnPID(long double targetAngle, uint32_t timeout) {
+    if (!ODOMETRY_ENABLED) {
+        pros::lcd::set_text(1, "Error: Odometry required for autonomous");
+        return false;
+    }
+
+    uint32_t startTime = pros::millis();
+    pointTurnPIDController.reset();
+
+    while (true) {
+        uint32_t currentTime = pros::millis() - startTime;
+
+        // Get current angle
+        odom_mutex.take(TIMEOUT_MAX);
+        long double currentAngle = globalAngle;
+        odom_mutex.give();
+
+        // Calculate turn power
+        long double turnPower = pointTurnPIDController.update(targetAngle, currentAngle, 0.1);
+
+        // Apply to all motors
+        leftFront.move_voltage(turnPower);
+        leftBack.move_voltage(turnPower);
+        rightFront.move_voltage(-turnPower);
+        rightBack.move_voltage(-turnPower);
+
+        // Check exit conditions
+        long double error = std::abs(targetAngle - currentAngle);
+        if (error < 0.05) { // Within ~3 degrees
+            break;
+        }
+
+        if (currentTime >= timeout) {
+            pros::lcd::set_text(1, "Turn timeout");
+            break;
+        }
+
+        pros::delay(20);
+    }
+
+    // Stop motors
+    leftFront.move_velocity(0);
+    leftBack.move_velocity(0);
+    rightFront.move_velocity(0);
+    rightBack.move_velocity(0);
+    leftFront.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    leftBack.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    rightFront.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+    rightBack.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+
+    return true;
+}
+
+#include "main.h"
+#include "globals.hpp"
+#include <string>
+
+/**
+ * Encoder and odometry test function
+ * Manually move the robot's wheels to test encoder connections and odometry calculations
+ * Displays real-time encoder values, calculated position, and heading
+ * 
+ * Instructions:
+ * 1. Place robot on field/mat
+ * 2. Run this function in autonomous
+ * 3. Manually push/pull the robot in different directions
+ * 4. Watch the Brain screen to verify:
+ *    - Encoders are counting correctly
+ *    - Position updates match your movements
+ *    - Heading changes when you rotate the robot
+ */
+void testEncoders() {
+    // Reset all tracking values
+    globalX = 0;
+    globalY = 0;
+    globalAngle = 0;
+    
+    // Reset encoder positions
+    verticalEncoder1.reset();
+    horizontalEncoder.reset();
+    inertial.tare();
+    
+    pros::lcd::clear();
+    pros::lcd::set_text(0, "=== ENCODER TEST MODE ===");
+    pros::lcd::set_text(1, "Manually move the robot!");
+    
+    // Wait for IMU to calibrate
+    pros::delay(2000);
+    
+    // Initialize tracking variables
+    long double lastV = 0, currentV = 0;
+    long double lastH = 0, currentH = 0;
+    long double lastAngle = 0, currentAngle = 0;
+    
+    int loopCount = 0;
+    
+    while (true) {
+        // Read raw encoder values
+        long rawVertical = verticalEncoder1.get_value();
+        long rawHorizontal = horizontalEncoder.get_value();
+        long double rawIMU = inertial.get_rotation();
+        
+        // Convert to inches
+        currentV = rawVertical * TICKS_TO_INCHES;
+        currentH = rawHorizontal * TICKS_TO_INCHES;
+        currentAngle = rawIMU * (PI / 180.0);
+        
+        // Calculate position change
+        PositionTracking robotPos(
+            lastAngle,
+            currentH, lastH,
+            currentV, lastV,
+            currentAngle
+        );
+        
+        // Update global position
+        if (!std::isnan(robotPos.getX()) && !std::isnan(robotPos.getY())) {
+            globalX += robotPos.getX();
+            globalY += robotPos.getY();
+            globalAngle = currentAngle;
+        }
+        
+        // Update display every 10 loops (5 times per second)
+        if (loopCount % 10 == 0) {
+            // Line 2: Raw encoder counts
+            pros::lcd::set_text(2, 
+                "RAW V:" + std::to_string(rawVertical) + 
+                " H:" + std::to_string(rawHorizontal));
+            
+            // Line 3: Encoder distances in inches
+            pros::lcd::set_text(3, 
+                "V:" + std::to_string(currentV).substr(0, 6) + "in" +
+                " H:" + std::to_string(currentH).substr(0, 6) + "in");
+            
+            // Line 4: IMU heading
+            pros::lcd::set_text(4, 
+                "IMU: " + std::to_string(rawIMU).substr(0, 7) + " deg");
+            
+            // Line 5: Calculated global position
+            pros::lcd::set_text(5, 
+                "X:" + std::to_string(globalX).substr(0, 6) + 
+                " Y:" + std::to_string(globalY).substr(0, 6));
+            
+            // Line 6: Calculated heading in degrees
+            pros::lcd::set_text(6, 
+                "Heading: " + std::to_string(globalAngle * 180.0 / PI).substr(0, 7) + " deg");
+            
+            // Line 7: Movement deltas
+            long double deltaV = currentV - lastV;
+            long double deltaH = currentH - lastH;
+            pros::lcd::set_text(7, 
+                "dV:" + std::to_string(deltaV).substr(0, 5) + 
+                " dH:" + std::to_string(deltaH).substr(0, 5));
+        }
+        
+        // Update last values
+        lastV = currentV;
+        lastH = currentH;
+        lastAngle = currentAngle;
+        
+        loopCount++;
+        
+        // Run at 50Hz
+        pros::delay(20);
+        
+        // Exit condition: press center button on brain
+        if (pros::lcd::read_buttons() == LCD_BTN_CENTER) {
+            pros::lcd::clear();
+            pros::lcd::set_text(0, "Test ended!");
+            pros::lcd::set_text(1, "Final position:");
+            pros::lcd::set_text(2, "X: " + std::to_string(globalX));
+            pros::lcd::set_text(3, "Y: " + std::to_string(globalY));
+            pros::lcd::set_text(4, "Angle: " + std::to_string(globalAngle * 180.0 / PI));
+            break;
+        }
+    }
+}
+
+/**
+ * Simple encoder diagnostic - just shows raw values without odometry calculations
+ * Useful for verifying encoder wiring and direction
+ */
+void testEncodersSimple() {
+    //pros::lcd::clear();
+    pros::lcd::set_text(0, "=== RAW ENCODER TEST ===");
+    pros::lcd::set_text(1, "Move wheels manually");
+    pros::lcd::set_text(7, "Press CENTER to exit");
+    
+    while (true) {
+        // Read raw values
+        long rawV = verticalEncoder1.get_value();
+        long rawH = horizontalEncoder.get_value();
+        long double rawIMU = inertial.get_rotation();
+        
+        // Display raw counts
+        pros::lcd::set_text(2, "Vertical Encoder:");
+        pros::lcd::set_text(3, "  Count: " + std::to_string(rawV));
+        
+        pros::lcd::set_text(4, "Horizontal Encoder:");
+        pros::lcd::set_text(5, "  Count: " + std::to_string(rawH));
+        
+        pros::lcd::set_text(6, "IMU: " + std::to_string(rawIMU) + " deg");
+        
+        pros::delay(50);
+        
+        // Exit on button press
+        if (pros::lcd::read_buttons() == LCD_BTN_CENTER) {
+            pros::lcd::clear();
+            pros::lcd::set_text(0, "Test ended!");
+            break;
+        }
+    }
+}
+
+/**
+ * Autonomous routine
+ * 
+ * IMPORTANT: This is a TEMPLATE. The old routine was specific to the 2020-21 game.
+ * You need to create your own autonomous routine for your current game/robot.
+ */
+void autonomous() {
+    if (!ODOMETRY_ENABLED) {
+        pros::lcd::set_text(1, "Cannot run autonomous: Odometry disabled");
+        pros::lcd::set_text(2, "Set ODOMETRY_ENABLED = true in globals.cpp");
+        return;
+    }
+
+    testEncodersSimple();
+}
+
+void old_autonomous() {
+    if (!ODOMETRY_ENABLED) {
+        pros::lcd::set_text(1, "Cannot run autonomous: Odometry disabled");
+        pros::lcd::set_text(2, "Set ODOMETRY_ENABLED = true in globals.cpp");
+        return;
+    }
+
+    // Initialize PID controllers with tuned values
+    drivePID.setGains(DRIVE_PID_KP, DRIVE_PID_KI, DRIVE_PID_KD);
+    strafePID.setGains(STRAFE_PID_KP, STRAFE_PID_KI, STRAFE_PID_KD);
+    turnPID.setGains(TURN_PID_KP, TURN_PID_KI, TURN_PID_KD);
+    pointTurnPIDController.setGains(TURN_PID_KP * 2, TURN_PID_KI, TURN_PID_KD);
+
+    // Start ball counting task
+    pros::Task ballCounter(ballCountingTask, nullptr, "Ball Counter");
+
+    pros::lcd::set_text(1, "Running Autonomous...");
+
+    // ==================== YOUR AUTONOMOUS ROUTINE GOES HERE ====================
+    
+    deploy();
+    pros::delay(500);
+
+    // Turn 90 degrees right
+    pointTurnPID(PI / 2.0, 1000);
+    pros::delay(500);
+    
+    // Move forward 23 inches
+    translationPID(0, 23, 0, 2000, false);
+    pros::delay(500);
+
+    // Turn 90 degrees left
+    pointTurnPID(0, 1000);
+    pros::delay(500);
+    
+    // Move forward 20 inches
+    translationPID(24, 24, PI / 2.0, 2000, false);
+    pros::delay(500);
+
+    // ==================== END AUTONOMOUS ROUTINE ====================
+
+    pros::lcd::set_text(1, "Autonomous Complete!");
+}
