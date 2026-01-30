@@ -2,21 +2,23 @@
  * main.cpp - VEX Robot Control System
  * 
  * Robot Configuration:
- * - Tank drive with omni wheels (3 motors per side)
- * - Complex intake/elevator system (3 motors)
+ * - Tank drive with omni wheels (6 motors total: 3 per side)
+ *   - leftBack: GREEN cartridge (200 RPM)
+ *   - rightMiddle: GREEN cartridge (200 RPM)
+ *   - All others: BLUE cartridge (600 RPM)
+ * - Complex intake/elevator system (4 motors - all GREEN cartridges)
  * - Pneumatic scooper
  * - Odometry system (vertical + horizontal encoders)
  * 
  * Control Scheme:
  * - Left Stick Y: Forward/Backward
  * - Right Stick X: Strafe Left/Right
- * - Left Sti☺ck X: Turning
+ * - Left Stick X: Turning
  * - R1: Intake (bring game piece up)
  * - R2: Outtake through top rollers
  * - L1: Outtake through middle roller
  * - L2: Outtake through back rollers (to storage)
- * - Up: Carry down and outtake through bottom
- * - Down: Reverse all intake motors
+ * - Down: Carry down and outtake through bottom
  * - X: Toggle scooper
  * - Y: Reset odometry
  * - A: Recalibrate encoders
@@ -29,34 +31,30 @@
 // ==================== MOTOR DECLARATIONS ====================
 
 // DRIVETRAIN - 6 motors (3 per side, linear tank configuration with omni wheels)
-pros::Motor leftFront(1, pros::MotorGearset::blue);      // Port 1
-pros::Motor leftMiddle(2, pros::MotorGearset::blue);     // Port 2
-pros::Motor leftBack(3, pros::MotorGearset::blue);       // Port 3
+// Mixed gearset: leftBack and rightMiddle are GREEN (200 RPM), rest are BLUE (600 RPM)
+pros::Motor leftFront(-15, pros::MotorGearset::blue);      // Port 15 (reversed) - BLUE
+pros::Motor leftMiddle(-16, pros::MotorGearset::blue);     // Port 16 (reversed) - BLUE
+pros::Motor leftBack(-17, pros::MotorGearset::green);      // Port 17 (reversed) - GREEN
 
-pros::Motor rightFront(-4, pros::MotorGearset::blue);    // Port 4 (reversed)
-pros::Motor rightMiddle(-5, pros::MotorGearset::blue);   // Port 5 (reversed)
-pros::Motor rightBack(-6, pros::MotorGearset::blue);     // Port 6 (reversed)
+pros::Motor rightFront(1, pros::MotorGearset::blue);    // Port 1 - BLUE
+pros::Motor rightMiddle(2, pros::MotorGearset::green);   // Port 2 - GREEN
+pros::Motor rightBack(3, pros::MotorGearset::blue);     // Port 3 - BLUE
 
-// Motor groups for LemLib
-pros::MotorGroup leftMotors({1, 2, 3}, pros::MotorGearset::blue);
-pros::MotorGroup rightMotors({-4, -5, -6}, pros::MotorGearset::blue);
+// NOTE: Motor groups cannot be created with mixed gearsets
+// We'll control motors individually in the omniDrive function
 
-// INTAKE/ELEVATOR SYSTEM - 3 motors
-// Motor 7: Front top motor (controls front top 2 rollers)  --- port 7 wasnt working, so port 10 is used instead
-pros::Motor frontTopMotor(10, pros::MotorGearset::green);
-
-// Motor 8: Back top motor (controls back top roller + front middle roller via chain)
-pros::Motor backTopMotor(8, pros::MotorGearset::green);
-
-// Motor 9: Back middle motor (controls back middle roller)
-pros::Motor backMiddleMotor(9, pros::MotorGearset::green);
-
-// Note: The bottom front roller (actual intake) is chained to backTopMotor
+// INTAKE/ELEVATOR SYSTEM - 4 motors (all GREEN cartridges - 200 RPM)
+// Port 7 wasn't working, so port 10 is used instead
+pros::Motor frontTopMotor(10, pros::MotorGearset::green);     // Front top 2 rollers
+pros::Motor frontMiddleMotor(6, pros::MotorGearset::green);   // Front middle roller + chained to front bottom roller
+pros::Motor backTopMotor(9, pros::MotorGearset::green);       // Back top
+pros::Motor backMiddleMotor(8, pros::MotorGearset::green);    // Back middle roller
 
 // ==================== PNEUMATICS ====================
 pros::adi::DigitalOut scooper('A');  // Pneumatic solenoid for scooper
 
 // ==================== SENSORS ====================
+// Encoders are now attached, so reversed flag is set to 'false' (standard orientation)
 pros::adi::Encoder verticalEncoder('B', 'C', false);    // Vertical tracking wheel
 pros::adi::Encoder horizontalEncoder('D', 'E', false);  // Horizontal tracking wheel
 
@@ -65,24 +63,25 @@ pros::Controller master(pros::E_CONTROLLER_MASTER);
 
 // ==================== ROBOT CONFIGURATION ====================
 
-// Tracking wheel specifications
+// Tracking wheel specifications          ------------------------------------ NEEDS TO BE MEASURED
 const double TRACKING_WHEEL_DIAMETER = 2.75;  // inches
 const double TRACKING_WHEEL_DISTANCE = 360.0 / (TRACKING_WHEEL_DIAMETER * M_PI);  // ticks per inch
 
-// Robot physical dimensions
+// Robot physical dimensions        ------------------------------------ NEEDS TO BE MEASURED
 const double WHEEL_DIAMETER = 3.25;           // inches (omni wheels)
 const double TRACK_WIDTH = 12.0;              // inches (distance between left and right wheels)
 const double WHEELBASE_LENGTH = 12.0;         // inches (front to back distance)
 
-// Tracking wheel offsets from center of rotation
-const double VERTICAL_OFFSET = 2.0;           // inches forward from center
+// Tracking wheel offsets from center of rotation        ------------------------------------ NEEDS TO BE MEASURED 
+const double VERTICAL_OFFSET = 2.0;           // inches forward from center 
 const double HORIZONTAL_OFFSET = 5.5;         // inches to the side from center
 
-// Motor speeds (RPM)
-const int INTAKE_SPEED = 200;
-const int OUTTAKE_SPEED = 150;
+// Motor speeds (RPM) - All intake motors are GREEN (200 RPM max)
+const int INTAKE_SPEED = 180;      // Adjusted for green motors (was 200)
+const int OUTTAKE_SPEED = 140;     // Adjusted for green motors (was 150)
 
-// Deadzone for joysticks
+// Deadzone for joysticks (typically 5-15 for VEX controllers)        ------------------------------------ NEEDS TO BE MEASURED
+// Test by gently touching sticks - if robot moves, increase deadzone
 const int JOYSTICK_DEADZONE = 10;
 
 // ==================== LEMLIB SETUP ====================
@@ -103,38 +102,48 @@ lemlib::TrackingWheel horizontal(
 );
 
 // PID Controllers for autonomous movement
+// Lateral = forward/backward/strafe movement
+// Angular = turning movement
+// These values are tuned starting points - you may need to adjust based on testing       ------------------------------------ NEEDS TO BE TUNED
 lemlib::ControllerSettings lateralController(
-    10,   // kP
-    0,    // kI
-    55,   // kD
+    10,   // kP - proportional gain (increase if robot is slow to reach target)
+    0,    // kI - integral gain (helps with steady-state error, usually 0)
+    55,   // kD - derivative gain (dampens oscillation, prevents overshoot)
     3,    // anti-windup
-    1,    // small error range
-    100,  // small error timeout
-    3,    // large error range
-    500,  // large error timeout
-    20    // slew rate
+    1,    // small error range (inches)
+    100,  // small error timeout (ms)
+    3,    // large error range (inches)
+    500,  // large error timeout (ms)
+    20    // slew rate (acceleration limit)
 );
 
 lemlib::ControllerSettings angularController(
-    4,    // kP
-    0,    // kI
-    40,   // kD
+    4,    // kP - (increase if robot is slow to turn)
+    0,    // kI - (usually keep at 0)
+    40,   // kD - (prevents oscillation during turns)
     3,    // anti-windup
-    1,    // small error range
-    100,  // small error timeout
-    3,    // large error range
-    500,  // large error timeout
-    0     // slew rate
+    1,    // small error range (degrees)
+    100,  // small error timeout (ms)
+    3,    // large error range (degrees)
+    500,  // large error timeout (ms)
+    0     // slew rate (no acceleration limit for turns)
 );
 
-// Drivetrain configuration
+// Drivetrain configuration for LemLib
+// Since we have mixed gearsets, we create custom motor groups here
+// We'll use weighted averaging for RPM calculation
+// 4 blue motors (600 RPM) + 2 green motors (200 RPM) = avg ~467 RPM
+// Being conservative: using 400 RPM
+pros::MotorGroup leftMotors({-15, -16, -17});
+pros::MotorGroup rightMotors({1, 2, 3});
+
 lemlib::Drivetrain drivetrain(
     &leftMotors,
     &rightMotors,
     TRACK_WIDTH,
     lemlib::Omniwheel::NEW_325,  // 3.25" omni wheels
-    360,  // RPM (blue cartridge = 600 RPM, but using conservative value)
-    2     // horizontal drift correction
+    400,  // RPM (conservative mixed gearset average)
+    2     // horizontal drift correction (tune if robot drifts during straight movement)       ------------------------------------ NEEDS TO BE TUNED
 );
 
 // Odometry sensors (using encoders only, no IMU)
@@ -180,6 +189,9 @@ int constrain(int value, int min, int max) {
  * @param forward Forward/backward speed (-127 to 127)
  * @param strafe Left/right strafe speed (-127 to 127)
  * @param turn Rotation speed (-127 to 127)
+ * 
+ * NOTE: Motor power range is -127 to 127 (this is the PROS API standard)
+ * With mixed gearsets, we scale GREEN motor speeds to compensate (they're 1/3 the RPM)
  */
 void omniDrive(int forward, int strafe, int turn) {
     // Apply deadzone
@@ -203,14 +215,16 @@ void omniDrive(int forward, int strafe, int turn) {
         rightPower *= scale;
     }
     
-    // Apply to all motors
-    leftFront.move(leftPower);
-    leftMiddle.move(leftPower);
-    leftBack.move(leftPower);
+    // Apply to motors
+    // GREEN motors (1/3 speed) need 3x power to match BLUE motors
+    // We scale them proportionally for balanced movement
+    leftFront.move(leftPower);              // BLUE
+    leftMiddle.move(leftPower);             // BLUE
+    leftBack.move(leftPower * 3);           // GREEN - compensated
     
-    rightFront.move(rightPower);
-    rightMiddle.move(rightPower);
-    rightBack.move(rightPower);
+    rightFront.move(rightPower);            // BLUE
+    rightMiddle.move(rightPower * 3);       // GREEN - compensated
+    rightBack.move(rightPower);             // BLUE
 }
 
 /**
@@ -244,6 +258,7 @@ void setDriveBrakeMode(pros::motor_brake_mode_e mode) {
  */
 void stopIntake() {
     frontTopMotor.move_velocity(0);
+    frontMiddleMotor.move_velocity(0);
     backTopMotor.move_velocity(0);
     backMiddleMotor.move_velocity(0);
 }
@@ -254,9 +269,21 @@ void stopIntake() {
  * - All rollers move to carry piece upward
  */
 void intakeUp() {
-    frontTopMotor.move_velocity(INTAKE_SPEED);      // Front top rollers forward (reverse)
-    backTopMotor.move_velocity(INTAKE_SPEED);       // Back top + front middle + bottom intake (reverse)
+    frontTopMotor.move_velocity(INTAKE_SPEED);       // Front top rollers forward
+    frontMiddleMotor.move_velocity(INTAKE_SPEED);    // Front middle roller forward
+    backTopMotor.move_velocity(INTAKE_SPEED);        // Back top + bottom intake forward
     backMiddleMotor.move_velocity(-INTAKE_SPEED);    // Back middle roller forward
+}
+
+/**
+ * OUTTAKE MIDDLE: Eject through front middle roller
+ * Controlled by frontMiddleMotor
+ */
+void outtakeMiddle() {
+    frontTopMotor.move_velocity(-OUTTAKE_SPEED);     // Front top rollers reverse
+    frontMiddleMotor.move_velocity(-OUTTAKE_SPEED);  // Front middle outtakes
+    backTopMotor.move_velocity(-INTAKE_SPEED);        // Don't allow piece to go into storage
+    backMiddleMotor.move_velocity(0);                // Neutral
 }
 
 /**
@@ -264,19 +291,10 @@ void intakeUp() {
  * Used for scoring at high positions
  */
 void outtakeTop() {
-    frontTopMotor.move_velocity(OUTTAKE_SPEED);    // Front top rollers reverse (outtake)
+    frontTopMotor.move_velocity(OUTTAKE_SPEED);      // Front top rollers outtake
+    frontMiddleMotor.move_velocity(INTAKE_SPEED);    // Feed to top
     backTopMotor.move_velocity(-INTAKE_SPEED);       // Keep feeding up
-    backMiddleMotor.move_velocity(-INTAKE_SPEED);    // Keep feeding up
-}
-
-/**
- * OUTTAKE MIDDLE: Eject through front middle roller
- * Controlled by backTopMotor (chained connection)
- */
-void outtakeMiddle() {
-    frontTopMotor.move_velocity(0);                 // Keep top rollers stopped
-    backTopMotor.move_velocity(OUTTAKE_SPEED);     // Reverse to push out middle
-    backMiddleMotor.move_velocity(-INTAKE_SPEED);    // Feed from below
+    backMiddleMotor.move_velocity(0);                // Neutral
 }
 
 /**
@@ -284,34 +302,30 @@ void outtakeMiddle() {
  * Both back motors reverse to push piece backward
  */
 void outtakeBack() {
-    frontTopMotor.move_velocity(0);                    // Front stays neutral
-    backTopMotor.move_velocity(OUTTAKE_SPEED);        // Back top reverses
-    backMiddleMotor.move_velocity(-OUTTAKE_SPEED);     // Back middle 
+    frontTopMotor.move_velocity(0);                  // Front stays neutral
+    frontMiddleMotor.move_velocity(0);               // Neutral
+    backTopMotor.move_velocity(OUTTAKE_SPEED);       // Back top reverses
+    backMiddleMotor.move_velocity(-OUTTAKE_SPEED);   // Back middle reverses
 }
 
 /**
  * CARRY DOWN AND OUTTAKE BOTTOM: Lower piece and eject through bottom intake
  * All motors reverse to bring piece down and out
+ * This replaces the old "reverseIntake" function - more intuitive control
  */
 void outtakeBottom() {
-    frontTopMotor.move_velocity(0);    // Front stays neutral
-    backTopMotor.move_velocity(OUTTAKE_SPEED);     // Reverse bottom intake
-    backMiddleMotor.move_velocity(OUTTAKE_SPEED);  // Bring down (reverse)
-}
-
-/**
- * REVERSE ALL: Emergency reverse of entire intake system
- */
-void reverseIntake() {
-    frontTopMotor.move_velocity(0);    // opposite of intakeUp()
-    backTopMotor.move_velocity(-INTAKE_SPEED);    // opposite of intakeUp()
-    backMiddleMotor.move_velocity(INTAKE_SPEED);    // opposite of intakeUp()
+    frontTopMotor.move_velocity(-INTAKE_SPEED);      // Reverse to bring down
+    frontMiddleMotor.move_velocity(-INTAKE_SPEED);   // NEW: Reverse to bring down
+    backTopMotor.move_velocity(OUTTAKE_SPEED);       // Reverse bottom intake
+    backMiddleMotor.move_velocity(INTAKE_SPEED);     // Reverse to bring down
 }
 
 // ==================== SCOOPER CONTROL ====================
 
 /**
  * Deploy scooper (extend pneumatic)
+ * When scooper.set_value(true), the pneumatic cylinder extends
+ * This should push the scooper out/down to collect game pieces
  */
 void deployScooper() {
     scooper.set_value(true);
@@ -320,6 +334,8 @@ void deployScooper() {
 
 /**
  * Retract scooper (retract pneumatic)
+ * When scooper.set_value(false), the pneumatic cylinder retracts
+ * This should pull the scooper back/up out of the way
  */
 void retractScooper() {
     scooper.set_value(false);
@@ -624,11 +640,11 @@ void opcontrol() {
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
             intakeUp();
         }
-        // R2: Outtake through top rollers
+        // R2: Outtake through top
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
             outtakeTop();
         }
-        // L1: Outtake through middle roller
+        // L1: Outtake through middle
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
             outtakeMiddle();
         }
@@ -636,13 +652,9 @@ void opcontrol() {
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
             outtakeBack();
         }
-        // Up: Carry down and outtake through bottom
-        else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_UP)) {
-            outtakeBottom();
-        }
-        // Down: Reverse all intake motors
+        // Down: Carry down and outtake through bottom
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN)) {
-            reverseIntake();
+            outtakeBottom();
         }
         // No buttons: Stop intake
         else {
