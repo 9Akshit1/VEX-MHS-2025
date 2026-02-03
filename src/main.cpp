@@ -2,26 +2,37 @@
  * main.cpp - VEX Robot Control System
  * 
  * Robot Configuration:
- * - Tank drive with omni wheels (6 motors total: 3 per side)
- *   - leftBack: GREEN cartridge (200 RPM)
- *   - rightMiddle: GREEN cartridge (200 RPM)
- *   - All others: BLUE cartridge (600 RPM)
- * - Complex intake/elevator system (4 motors - all GREEN cartridges)
- * - Pneumatic scooper
- * - Odometry system (vertical + horizontal encoders)
+ * - 6-motor drivetrain (all BLUE cartridges - 600 RPM)
+ *   - Left: Ports 15, 16, 19 (reversed)
+ *   - Right: Ports 1, 2, 3
+ * - Complex intake/elevator system (4 motors - all GREEN cartridges - 200 RPM)
+ *   - frontTopMotor: Port 10
+ *   - frontMiddleMotor: Port 6
+ *   - backTopMotor: Port 9
+ *   - backMiddleMotor: Port 8
+ * - Pneumatics:
+ *   - Scooper: Port D (controlled by X/B)
+ *   - Piston2: Port A (controlled by A/Y)
+ * - Sensors:
+ *   - Vertical Encoder: 3-wire ports B,C
+ *   - Horizontal Encoder: 3-wire ports H,F
+ *   - IMU: Smart port (needs to be specified - assuming Port 11)
  * 
  * Control Scheme:
- * - Left Stick Y: Forward/Backward
- * - Right Stick X: Strafe Left/Right
- * - Left Stick X: Turning
- * - R1: Intake (bring game piece up)
- * - R2: Outtake through top rollers
- * - L1: Outtake through middle roller
- * - L2: Outtake through back rollers (to storage)
- * - Down: Carry down and outtake through bottom
- * - X: Toggle scooper
- * - Y: Reset odometry
- * - A: Recalibrate encoders
+ * - Left Stick Y (Axis3): Forward/Backward
+ * - Left Stick X (Axis1): Turning
+ * - R1: Intake middle (Port 6 forward, others run to support)
+ * - R2: Intake top (shoot to top - all motors forward)
+ * - L1: Intake to bottom storage
+ * - L2: Intake to top storage
+ * - D-Pad Up: Port 6 CCW
+ * - D-Pad Down: Port 9 CCW
+ * - D-Pad Left: Port 8 CW
+ * - D-Pad Right: Port 10 CW
+ * - X: Extend scooper (Port D)
+ * - B: Retract scooper (Port D)
+ * - A: Extend piston2 (Port A)
+ * - Y: Retract piston2 (Port A)
  */
 
 #include "main.h"
@@ -30,58 +41,56 @@
 
 // ==================== MOTOR DECLARATIONS ====================
 
-// DRIVETRAIN - 6 motors (3 per side, linear tank configuration with omni wheels)
-// Mixed gearset: leftBack and rightMiddle are GREEN (200 RPM), rest are BLUE (600 RPM)
-pros::Motor leftFront(-15, pros::MotorGearset::blue);      // Port 15 (reversed) - BLUE
-pros::Motor leftMiddle(-16, pros::MotorGearset::blue);     // Port 16 (reversed) - BLUE
-pros::Motor leftBack(-17, pros::MotorGearset::green);      // Port 17 (reversed) - GREEN
+// DRIVETRAIN - 6 motors (3 per side, all BLUE cartridges - 600 RPM)
+pros::Motor leftFront(-15, pros::MotorGearset::blue);      // Port 15 (reversed)
+pros::Motor leftMiddle(-16, pros::MotorGearset::blue);     // Port 16 (reversed)
+pros::Motor leftBack(-19, pros::MotorGearset::blue);       // Port 19 (reversed)
 
-pros::Motor rightFront(1, pros::MotorGearset::blue);    // Port 1 - BLUE
-pros::Motor rightMiddle(2, pros::MotorGearset::green);   // Port 2 - GREEN
-pros::Motor rightBack(3, pros::MotorGearset::blue);     // Port 3 - BLUE
-
-// NOTE: Motor groups cannot be created with mixed gearsets
-// We'll control motors individually in the omniDrive function
+pros::Motor rightFront(1, pros::MotorGearset::blue);       // Port 1
+pros::Motor rightMiddle(2, pros::MotorGearset::blue);      // Port 2
+pros::Motor rightBack(3, pros::MotorGearset::blue);        // Port 3
 
 // INTAKE/ELEVATOR SYSTEM - 4 motors (all GREEN cartridges - 200 RPM)
-// Port 7 wasn't working, so port 10 is used instead
-pros::Motor frontTopMotor(10, pros::MotorGearset::green);     // Front top 2 rollers
-pros::Motor frontMiddleMotor(6, pros::MotorGearset::green);   // Front middle roller + chained to front bottom roller
-pros::Motor backTopMotor(9, pros::MotorGearset::green);       // Back top
-pros::Motor backMiddleMotor(8, pros::MotorGearset::green);    // Back middle roller
+pros::Motor frontTopMotor(10, pros::MotorGearset::green);     // Port 10
+pros::Motor frontMiddleMotor(6, pros::MotorGearset::green);   // Port 6
+pros::Motor backTopMotor(9, pros::MotorGearset::green);       // Port 9
+pros::Motor backMiddleMotor(8, pros::MotorGearset::green);    // Port 8
 
 // ==================== PNEUMATICS ====================
-pros::adi::DigitalOut scooper('A');  // Pneumatic solenoid for scooper
+pros::adi::DigitalOut scooper('D');  // Port D - Scooper control (X/B buttons)
+pros::adi::DigitalOut piston2('A');  // Port A - Piston2 control (A/Y buttons)
 
 // ==================== SENSORS ====================
-// Encoders are now attached, so reversed flag is set to 'false' (standard orientation)
-pros::adi::Encoder verticalEncoder('B', 'C', false);    // Vertical tracking wheel
-pros::adi::Encoder horizontalEncoder('D', 'E', false);  // Horizontal tracking wheel
+// Encoders (3-wire ADI ports)
+pros::adi::Encoder verticalEncoder('B', 'C', false);      // Vertical tracking wheel on ports B,C
+pros::adi::Encoder horizontalEncoder('H', 'F', false);    // Horizontal tracking wheel on ports H,F
+
+// IMU (Smart port) - ADJUST PORT NUMBER AS NEEDED
+pros::Imu imu(11);  // Assuming IMU is on port 11 - change if different
 
 // ==================== CONTROLLER ====================
 pros::Controller master(pros::E_CONTROLLER_MASTER);
 
 // ==================== ROBOT CONFIGURATION ====================
 
-// Tracking wheel specifications          ------------------------------------ NEEDS TO BE MEASURED
-const double TRACKING_WHEEL_DIAMETER = 2.75;  // inches
+// Tracking wheel specifications
+const double TRACKING_WHEEL_DIAMETER = 2.75;  // inches - MEASURE YOUR ACTUAL WHEELS
 const double TRACKING_WHEEL_DISTANCE = 360.0 / (TRACKING_WHEEL_DIAMETER * M_PI);  // ticks per inch
 
-// Robot physical dimensions        ------------------------------------ NEEDS TO BE MEASURED
+// Robot physical dimensions
 const double WHEEL_DIAMETER = 3.25;           // inches (omni wheels)
 const double TRACK_WIDTH = 12.0;              // inches (distance between left and right wheels)
 const double WHEELBASE_LENGTH = 12.0;         // inches (front to back distance)
 
-// Tracking wheel offsets from center of rotation        ------------------------------------ NEEDS TO BE MEASURED 
+// Tracking wheel offsets from center of rotation - MEASURE THESE CAREFULLY
 const double VERTICAL_OFFSET = 2.0;           // inches forward from center 
 const double HORIZONTAL_OFFSET = 5.5;         // inches to the side from center
 
 // Motor speeds (RPM) - All intake motors are GREEN (200 RPM max)
-const int INTAKE_SPEED = 180;      // Adjusted for green motors (was 200)
-const int OUTTAKE_SPEED = 140;     // Adjusted for green motors (was 150)
+const int INTAKE_SPEED = 180;      // RPM for intake operations
+const int OUTTAKE_SPEED = 140;     // RPM for outtake operations
 
-// Deadzone for joysticks (typically 5-15 for VEX controllers)        ------------------------------------ NEEDS TO BE MEASURED
-// Test by gently touching sticks - if robot moves, increase deadzone
+// Deadzone for joysticks
 const int JOYSTICK_DEADZONE = 10;
 
 // ==================== LEMLIB SETUP ====================
@@ -102,39 +111,33 @@ lemlib::TrackingWheel horizontal(
 );
 
 // PID Controllers for autonomous movement
-// Lateral = forward/backward/strafe movement
-// Angular = turning movement
-// These values are tuned starting points - you may need to adjust based on testing       ------------------------------------ NEEDS TO BE TUNED
+// These values may need tuning based on your robot's performance
 lemlib::ControllerSettings lateralController(
-    10,   // kP - proportional gain (increase if robot is slow to reach target)
-    0,    // kI - integral gain (helps with steady-state error, usually 0)
-    55,   // kD - derivative gain (dampens oscillation, prevents overshoot)
+    10,   // kP - proportional gain
+    0,    // kI - integral gain
+    55,   // kD - derivative gain
     3,    // anti-windup
     1,    // small error range (inches)
     100,  // small error timeout (ms)
     3,    // large error range (inches)
     500,  // large error timeout (ms)
-    20    // slew rate (acceleration limit)
+    20    // slew rate
 );
 
 lemlib::ControllerSettings angularController(
-    4,    // kP - (increase if robot is slow to turn)
-    0,    // kI - (usually keep at 0)
-    40,   // kD - (prevents oscillation during turns)
+    4,    // kP - turn proportional gain
+    0,    // kI - turn integral gain
+    40,   // kD - turn derivative gain
     3,    // anti-windup
     1,    // small error range (degrees)
     100,  // small error timeout (ms)
     3,    // large error range (degrees)
     500,  // large error timeout (ms)
-    0     // slew rate (no acceleration limit for turns)
+    0     // slew rate
 );
 
 // Drivetrain configuration for LemLib
-// Since we have mixed gearsets, we create custom motor groups here
-// We'll use weighted averaging for RPM calculation
-// 4 blue motors (600 RPM) + 2 green motors (200 RPM) = avg ~467 RPM
-// Being conservative: using 400 RPM
-pros::MotorGroup leftMotors({-15, -16, -17});
+pros::MotorGroup leftMotors({-15, -16, -19});
 pros::MotorGroup rightMotors({1, 2, 3});
 
 lemlib::Drivetrain drivetrain(
@@ -142,17 +145,17 @@ lemlib::Drivetrain drivetrain(
     &rightMotors,
     TRACK_WIDTH,
     lemlib::Omniwheel::NEW_325,  // 3.25" omni wheels
-    400,  // RPM (conservative mixed gearset average)
-    2     // horizontal drift correction (tune if robot drifts during straight movement)       ------------------------------------ NEEDS TO BE TUNED
+    600,  // RPM (all BLUE motors)
+    2     // horizontal drift correction
 );
 
-// Odometry sensors (using encoders only, no IMU)
+// Odometry sensors - NOW WITH IMU FOR HEADING
 lemlib::OdomSensors sensors(
     &vertical,     // vertical tracking wheel
     nullptr,       // second vertical wheel (not used)
     &horizontal,   // horizontal tracking wheel
     nullptr,       // second horizontal wheel (not used)
-    nullptr        // no IMU
+    &imu           // IMU for accurate heading
 );
 
 // Create the chassis
@@ -160,6 +163,7 @@ lemlib::Chassis chassis(drivetrain, lateralController, angularController, sensor
 
 // ==================== GLOBAL STATE VARIABLES ====================
 bool scooperDeployed = false;
+bool piston2Deployed = false;
 bool autonomousMode = false;
 
 // ==================== UTILITY FUNCTIONS ====================
@@ -183,15 +187,11 @@ int constrain(int value, int min, int max) {
 // ==================== DRIVETRAIN CONTROL ====================
 
 /**
- * Tank drive with omni wheel strafing capability
- * Combines tank drive with lateral movement
+ * Omni drive control (tank drive with turning)
  * 
  * @param forward Forward/backward speed (-127 to 127)
  * @param strafe Left/right strafe speed (-127 to 127)
  * @param turn Rotation speed (-127 to 127)
- * 
- * NOTE: Motor power range is -127 to 127 (this is the PROS API standard)
- * With mixed gearsets, we scale GREEN motor speeds to compensate (they're 1/3 the RPM)
  */
 void omniDrive(int forward, int strafe, int turn) {
     // Apply deadzone
@@ -199,11 +199,7 @@ void omniDrive(int forward, int strafe, int turn) {
     strafe = applyDeadzone(strafe);
     turn = applyDeadzone(turn);
     
-    // For tank drive with omni wheels:
-    // - Forward/backward: both sides move same direction
-    // - Strafing: all wheels move same direction (omni wheels allow this)
-    // - Turning: sides move opposite directions
-    
+    // Calculate left and right power
     int leftPower = forward + strafe + turn;
     int rightPower = forward - strafe - turn;
     
@@ -216,15 +212,13 @@ void omniDrive(int forward, int strafe, int turn) {
     }
     
     // Apply to motors
-    // GREEN motors (1/3 speed) need 3x power to match BLUE motors
-    // We scale them proportionally for balanced movement
-    leftFront.move(leftPower);              // BLUE
-    leftMiddle.move(leftPower);             // BLUE
-    leftBack.move(leftPower * 3);           // GREEN - compensated
+    leftFront.move(leftPower);
+    leftMiddle.move(leftPower);
+    leftBack.move(leftPower);
     
-    rightFront.move(rightPower);            // BLUE
-    rightMiddle.move(rightPower * 3);       // GREEN - compensated
-    rightBack.move(rightPower);             // BLUE
+    rightFront.move(rightPower);
+    rightMiddle.move(rightPower);
+    rightBack.move(rightPower);
 }
 
 /**
@@ -254,355 +248,601 @@ void setDriveBrakeMode(pros::motor_brake_mode_e mode) {
 // ==================== INTAKE/ELEVATOR CONTROL ====================
 
 /**
- * Stop all intake/elevator motors
+ * Stop all intake motors
  */
 void stopIntake() {
-    frontTopMotor.move_velocity(0);
-    frontMiddleMotor.move_velocity(0);
-    backTopMotor.move_velocity(0);
-    backMiddleMotor.move_velocity(0);
+    frontTopMotor.move(0);
+    frontMiddleMotor.move(0);
+    backTopMotor.move(0);
+    backMiddleMotor.move(0);
 }
 
 /**
- * INTAKE MODE: Bring game piece up through the system
- * - Bottom intake roller pulls in
- * - All rollers move to carry piece upward
+ * R1: Intake middle
+ * Focus on port 6 (frontMiddle) with support from other motors
  */
-void intakeUp() {
-    frontTopMotor.move_velocity(INTAKE_SPEED);       // Front top rollers forward
-    frontMiddleMotor.move_velocity(INTAKE_SPEED);    // Front middle roller forward
-    backTopMotor.move_velocity(INTAKE_SPEED);        // Back top + bottom intake forward
-    backMiddleMotor.move_velocity(-INTAKE_SPEED);    // Back middle roller forward
+void intakeMiddle() {
+    frontMiddleMotor.move_velocity(INTAKE_SPEED);      // Port 6: Main intake
+    backMiddleMotor.move_velocity(-INTAKE_SPEED);      // Port 8: Support
+    frontTopMotor.move_velocity(-INTAKE_SPEED);        // Port 10: Support
+    backTopMotor.move(0);                              // Port 9: Off
 }
 
 /**
- * OUTTAKE MIDDLE: Eject through front middle roller
- * Controlled by frontMiddleMotor
+ * R2: Intake top (shoot to top)
+ * All motors forward to push balls up and out the top
  */
-void outtakeMiddle() {
-    frontTopMotor.move_velocity(-OUTTAKE_SPEED);     // Front top rollers reverse
-    frontMiddleMotor.move_velocity(-OUTTAKE_SPEED);  // Front middle outtakes
-    backTopMotor.move_velocity(-INTAKE_SPEED);        // Don't allow piece to go into storage
-    backMiddleMotor.move_velocity(0);                // Neutral
+void intakeTop() {
+    frontMiddleMotor.move_velocity(INTAKE_SPEED);      // Port 6: CW
+    frontTopMotor.move_velocity(INTAKE_SPEED);         // Port 10: CW
+    backMiddleMotor.move_velocity(-INTAKE_SPEED);      // Port 8: CCW
+    backTopMotor.move_velocity(-INTAKE_SPEED);         // Port 9: CCW
 }
 
 /**
- * OUTTAKE TOP: Eject through front top 2 rollers
- * Used for scoring at high positions
+ * L1: Intake to bottom storage
  */
-void outtakeTop() {
-    frontTopMotor.move_velocity(OUTTAKE_SPEED);      // Front top rollers outtake
-    frontMiddleMotor.move_velocity(INTAKE_SPEED);    // Feed to top
-    backTopMotor.move_velocity(-INTAKE_SPEED);       // Keep feeding up
-    backMiddleMotor.move_velocity(0);                // Neutral
+void intakeBottomStorage() {
+    frontMiddleMotor.move_velocity(INTAKE_SPEED);      // Port 6: CW
+    backMiddleMotor.move_velocity(INTAKE_SPEED);       // Port 8: CW
+    backTopMotor.move_velocity(INTAKE_SPEED);          // Port 9: CW
+    frontTopMotor.move(0);                             // Port 10: Off
 }
 
 /**
- * OUTTAKE BACK: Eject through back rollers into storage box
- * Both back motors reverse to push piece backward
+ * L2: Intake to top storage
  */
-void outtakeBack() {
-    frontTopMotor.move_velocity(0);                  // Front stays neutral
-    frontMiddleMotor.move_velocity(0);               // Neutral
-    backTopMotor.move_velocity(OUTTAKE_SPEED);       // Back top reverses
-    backMiddleMotor.move_velocity(-OUTTAKE_SPEED);   // Back middle reverses
+void intakeTopStorage() {
+    frontMiddleMotor.move_velocity(INTAKE_SPEED);      // Port 6: CW
+    backMiddleMotor.move_velocity(-INTAKE_SPEED);      // Port 8: CCW
+    frontTopMotor.move_velocity(INTAKE_SPEED);         // Port 10: CW
+    backTopMotor.move_velocity(INTAKE_SPEED);          // Port 9: CW
 }
 
 /**
- * CARRY DOWN AND OUTTAKE BOTTOM: Lower piece and eject through bottom intake
- * All motors reverse to bring piece down and out
- * This replaces the old "reverseIntake" function - more intuitive control
+ * D-Pad Up: Port 6 CCW
  */
-void outtakeBottom() {
-    frontTopMotor.move_velocity(-INTAKE_SPEED);      // Reverse to bring down
-    frontMiddleMotor.move_velocity(-INTAKE_SPEED);   // NEW: Reverse to bring down
-    backTopMotor.move_velocity(OUTTAKE_SPEED);       // Reverse bottom intake
-    backMiddleMotor.move_velocity(INTAKE_SPEED);     // Reverse to bring down
+void motor6CCW() {
+    frontMiddleMotor.move_velocity(-INTAKE_SPEED);     // Port 6: CCW
 }
 
-// ==================== SCOOPER CONTROL ====================
-
 /**
- * Deploy scooper (extend pneumatic)
- * When scooper.set_value(true), the pneumatic cylinder extends
- * This should push the scooper out/down to collect game pieces
+ * D-Pad Down: Port 9 CCW
  */
-void deployScooper() {
-    scooper.set_value(true);
-    scooperDeployed = true;
+void motor9CCW() {
+    backTopMotor.move_velocity(-INTAKE_SPEED);         // Port 9: CCW
 }
 
 /**
- * Retract scooper (retract pneumatic)
- * When scooper.set_value(false), the pneumatic cylinder retracts
- * This should pull the scooper back/up out of the way
+ * D-Pad Left: Port 8 CW
  */
-void retractScooper() {
-    scooper.set_value(false);
-    scooperDeployed = false;
+void motor8CW() {
+    backMiddleMotor.move_velocity(INTAKE_SPEED);       // Port 8: CW
 }
 
 /**
- * Toggle scooper state
+ * D-Pad Right: Port 10 CW
+ */
+void motor10CW() {
+    frontTopMotor.move_velocity(INTAKE_SPEED);         // Port 10: CW
+}
+
+// ==================== PNEUMATIC CONTROL ====================
+
+/**
+ * Toggle scooper pneumatic (Port D)
  */
 void toggleScooper() {
-    if (scooperDeployed) {
-        retractScooper();
-    } else {
-        deployScooper();
-    }
-}
-
-// ==================== AUTONOMOUS MOVEMENT FUNCTIONS ====================
-
-/**
- * Move forward by distance (inches)
- * Positive = forward, Negative = backward
- */
-void moveForward(double distance, int timeout = 3000) {
-    lemlib::Pose current = chassis.getPose();
-    double targetX = current.x + distance * cos(current.theta * M_PI / 180.0);
-    double targetY = current.y + distance * sin(current.theta * M_PI / 180.0);
-    
-    chassis.moveToPose(targetX, targetY, current.theta, timeout, {.minSpeed = 40});
+    scooperDeployed = !scooperDeployed;
+    scooper.set_value(scooperDeployed);
 }
 
 /**
- * Move backward by distance (inches)
+ * Deploy scooper
  */
-void moveBackward(double distance, int timeout = 3000) {
-    moveForward(-distance, timeout);
+void deployScooper() {
+    scooperDeployed = true;
+    scooper.set_value(true);
 }
 
 /**
- * Strafe right by distance (inches)
+ * Retract scooper
  */
-void strafeRight(double distance, int timeout = 3000) {
-    lemlib::Pose current = chassis.getPose();
-    double angle = (current.theta - 90) * M_PI / 180.0;  // Perpendicular to heading
-    double targetX = current.x + distance * cos(angle);
-    double targetY = current.y + distance * sin(angle);
-    
-    chassis.moveToPose(targetX, targetY, current.theta, timeout, {.minSpeed = 40});
+void retractScooper() {
+    scooperDeployed = false;
+    scooper.set_value(false);
 }
 
 /**
- * Strafe left by distance (inches)
+ * Toggle piston2 pneumatic (Port A)
  */
-void strafeLeft(double distance, int timeout = 3000) {
-    strafeRight(-distance, timeout);
+void togglePiston2() {
+    piston2Deployed = !piston2Deployed;
+    piston2.set_value(piston2Deployed);
 }
 
 /**
- * Turn to absolute heading (degrees)
- * 0° = forward, 90° = right, 180° = back, 270° = left
+ * Extend piston2
  */
-void turnToHeading(double heading, int timeout = 2000) {
-    chassis.turnToHeading(heading, timeout, {.minSpeed = 30});
+void extendPiston2() {
+    piston2Deployed = true;
+    piston2.set_value(true);
 }
 
 /**
- * Turn relative to current heading (degrees)
- * Positive = clockwise, Negative = counter-clockwise
+ * Retract piston2
  */
-void turnRelative(double degrees, int timeout = 2000) {
-    lemlib::Pose current = chassis.getPose();
-    double targetHeading = current.theta + degrees;
-    chassis.turnToHeading(targetHeading, timeout, {.minSpeed = 30});
+void retractPiston2() {
+    piston2Deployed = false;
+    piston2.set_value(false);
+}
+
+// ==================== AUTONOMOUS HELPER FUNCTIONS ====================
+
+/**
+ * Turn to absolute heading using LemLib
+ * @param degrees Target heading in degrees
+ * @param timeout Maximum time to wait (ms)
+ */
+void turnToHeading(double degrees, int timeout = 2000) {
+    chassis.turnToHeading(degrees, timeout);
 }
 
 /**
- * Turn clockwise by degrees
+ * Move forward a specific distance using LemLib
+ * @param inches Distance to move in inches
+ * @param timeout Maximum time to wait (ms)
  */
-void turnRight(double degrees, int timeout = 2000) {
-    turnRelative(degrees, timeout);
+void moveForward(double inches, int timeout = 3000) {
+    chassis.moveToPoint(0, inches, timeout);
 }
 
 /**
- * Turn counter-clockwise by degrees
+ * Run intake for specified duration
+ * @param duration Time to run intake in milliseconds
  */
-void turnLeft(double degrees, int timeout = 2000) {
-    turnRelative(-degrees, timeout);
-}
-
-/**
- * Move to specific coordinates (x, y, heading)
- */
-void moveToPose(double x, double y, double heading, int timeout = 3000) {
-    chassis.moveToPose(x, y, heading, timeout, {.minSpeed = 40});
-}
-
-/**
- * Move to specific point while maintaining current heading
- */
-void moveToPoint(double x, double y, int timeout = 3000) {
-    lemlib::Pose current = chassis.getPose();
-    chassis.moveToPose(x, y, current.theta, timeout, {.minSpeed = 40});
-}
-
-/**
- * Turn to face a specific point (x, y)
- */
-void turnToPoint(double x, double y, int timeout = 2000) {
-    chassis.turnToPoint(x, y, timeout, {.minSpeed = 30});
-}
-
-/**
- * Move along a path of points
- */
-void followPath(std::vector<lemlib::Pose> path, int timeout = 5000) {
-    for (const auto& point : path) {
-        chassis.moveToPose(point.x, point.y, point.theta, timeout, {.minSpeed = 40});
-    }
-}
-
-// ==================== AUTONOMOUS ACTION FUNCTIONS ====================
-
-/**
- * Intake for specified duration (milliseconds)
- */
-void autoIntake(int duration) {
-    intakeUp();
+void autoIntakeTop(int duration) {
+    intakeTop();
     pros::delay(duration);
     stopIntake();
-}
-
-/**
- * Outtake through top for specified duration
- */
-void autoOuttakeTop(int duration) {
-    outtakeTop();
-    pros::delay(duration);
-    stopIntake();
-}
-
-/**
- * Outtake through middle for specified duration
- */
-void autoOuttakeMiddle(int duration) {
-    outtakeMiddle();
-    pros::delay(duration);
-    stopIntake();
-}
-
-/**
- * Outtake through back for specified duration
- */
-void autoOuttakeBack(int duration) {
-    outtakeBack();
-    pros::delay(duration);
-    stopIntake();
-}
-
-/**
- * Outtake through bottom for specified duration
- */
-void autoOuttakeBottom(int duration) {
-    outtakeBottom();
-    pros::delay(duration);
-    stopIntake();
-}
-
-/**
- * Deploy scooper, wait, then retract
- */
-void autoScooperSequence(int deployDuration = 500) {
-    deployScooper();
-    pros::delay(deployDuration);
-    retractScooper();
-}
-
-/**
- * Intake sequence: Deploy scooper, intake, retract scooper
- */
-void autoFullIntake(int intakeDuration = 1500) {
-    deployScooper();
-    intakeUp();
-    pros::delay(intakeDuration);
-    stopIntake();
-    retractScooper();
 }
 
 // ==================== INITIALIZATION ====================
 
 void initialize() {
     pros::lcd::initialize();
-    pros::lcd::set_text(1, "=== INITIALIZING ===");
+    pros::lcd::set_text(1, "Initializing...");
+    
+    // Calibrate IMU - THIS IS CRITICAL
+    pros::lcd::set_text(2, "Calibrating IMU...");
+    imu.reset();
+    
+    // Wait for IMU to calibrate (takes about 2 seconds)
+    int timeout = 0;
+    while (imu.is_calibrating() && timeout < 3000) {
+        pros::delay(10);
+        timeout += 10;
+    }
+    
+    if (imu.is_calibrating()) {
+        pros::lcd::set_text(2, "IMU CALIBRATION FAILED!");
+    } else {
+        pros::lcd::set_text(2, "IMU Calibrated!");
+    }
+    
+    // Initialize chassis
+    chassis.calibrate();
+    
+    // Set initial states
+    retractScooper();
+    retractPiston2();
     
     // Reset encoders
-    pros::lcd::set_text(2, "Resetting encoders...");
     verticalEncoder.reset();
     horizontalEncoder.reset();
-    pros::delay(200);
     
-    // Initialize chassis position
-    chassis.calibrate();
+    pros::delay(500);
+    pros::lcd::set_text(3, "Ready!");
+}
+
+void disabled() {}
+
+void competition_initialize() {}
+
+// ==================== TEST FUNCTION 1: ENCODER TEST ====================
+
+/**
+ * Test encoders by displaying their raw values
+ * Call this during driver control by pressing a button
+ */
+void testEncoders() {
+    pros::lcd::clear();
+    pros::lcd::set_text(0, "=== ENCODER TEST ===");
+    
+    for (int i = 0; i < 100; i++) {  // Run for 10 seconds
+        int verticalValue = verticalEncoder.get_value();
+        int horizontalValue = horizontalEncoder.get_value();
+        double imuHeading = imu.get_rotation();
+        
+        pros::lcd::set_text(1, ("Vertical: " + std::to_string(verticalValue)).c_str());
+        pros::lcd::set_text(2, ("Horizontal: " + std::to_string(horizontalValue)).c_str());
+        pros::lcd::set_text(3, ("IMU Heading: " + std::to_string(imuHeading).substr(0, 6)).c_str());
+        pros::lcd::set_text(4, "Push robot to test!");
+        pros::lcd::set_text(5, "Press A to exit");
+        
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
+            break;
+        }
+        
+        pros::delay(100);
+    }
+}
+
+// ==================== TEST FUNCTION 2: DRIVE STRAIGHT TEST ====================
+
+/**
+ * Drive straight forward 24 inches
+ * Tests basic autonomous movement
+ */
+void testDriveStraight() {
+    pros::lcd::clear();
+    pros::lcd::set_text(0, "=== DRIVE STRAIGHT TEST ===");
+    pros::lcd::set_text(1, "Moving forward 24in...");
+    
+    // Set starting position
     chassis.setPose(0, 0, 0);
     
-    // Set brake modes
-    setDriveBrakeMode(pros::E_MOTOR_BRAKE_COAST);
+    // Drive forward 24 inches
+    chassis.moveToPoint(0, 24, 3000);
     
-    // Initialize pneumatics
-    retractScooper();
+    // Check final position
+    lemlib::Pose finalPose = chassis.getPose();
+    pros::lcd::set_text(2, ("Final Y: " + std::to_string(finalPose.y).substr(0, 6)).c_str());
+    pros::lcd::set_text(3, "Should be near 24");
     
-    pros::lcd::set_text(3, "Ready!");
+    pros::delay(2000);
+}
+
+// ==================== TEST FUNCTION 3: TURN TEST ====================
+
+/**
+ * Turn 90 degrees to test heading accuracy
+ */
+void testTurn90() {
+    pros::lcd::clear();
+    pros::lcd::set_text(0, "=== TURN 90 TEST ===");
+    pros::lcd::set_text(1, "Turning 90 degrees...");
+    
+    // Set starting position
+    chassis.setPose(0, 0, 0);
+    
+    // Turn 90 degrees
+    chassis.turnToHeading(90, 2000);
+    
+    // Check final heading
+    lemlib::Pose finalPose = chassis.getPose();
+    pros::lcd::set_text(2, ("Final Heading: " + std::to_string(finalPose.theta).substr(0, 6)).c_str());
+    pros::lcd::set_text(3, "Should be near 90");
+    
+    pros::delay(2000);
+}
+
+// ==================== TEST FUNCTION 4: SQUARE PATTERN TEST ====================
+
+/**
+ * Drive in a 24" square to test overall accuracy
+ * Robot should return to starting position
+ */
+void testSquarePattern() {
+    pros::lcd::clear();
+    pros::lcd::set_text(0, "=== SQUARE PATTERN TEST ===");
+    
+    // Set starting position
+    chassis.setPose(0, 0, 0);
+    setDriveBrakeMode(pros::E_MOTOR_BRAKE_HOLD);
+    
+    // Side 1: Move forward 24"
+    pros::lcd::set_text(1, "Side 1: Forward 24in");
+    chassis.moveToPoint(0, 24, 3000);
     pros::delay(500);
+    
+    // Turn 90° left
+    pros::lcd::set_text(1, "Turn 1: 90 degrees");
+    chassis.turnToHeading(90, 2000);
+    pros::delay(500);
+    
+    // Side 2: Move forward 24"
+    pros::lcd::set_text(1, "Side 2: Forward 24in");
+    lemlib::Pose pose2 = chassis.getPose();
+    chassis.moveToPoint(pose2.x + 24, pose2.y, 3000);
+    pros::delay(500);
+    
+    // Turn 90° left (now facing 180°)
+    pros::lcd::set_text(1, "Turn 2: 180 degrees");
+    chassis.turnToHeading(180, 2000);
+    pros::delay(500);
+    
+    // Side 3: Move forward 24"
+    pros::lcd::set_text(1, "Side 3: Forward 24in");
+    lemlib::Pose pose3 = chassis.getPose();
+    chassis.moveToPoint(pose3.x, pose3.y - 24, 3000);
+    pros::delay(500);
+    
+    // Turn 90° left (now facing 270° or -90°)
+    pros::lcd::set_text(1, "Turn 3: 270 degrees");
+    chassis.turnToHeading(270, 2000);
+    pros::delay(500);
+    
+    // Side 4: Move forward 24" (back to start)
+    pros::lcd::set_text(1, "Side 4: Forward 24in");
+    lemlib::Pose pose4 = chassis.getPose();
+    chassis.moveToPoint(pose4.x - 24, pose4.y, 3000);
+    pros::delay(500);
+    
+    // Turn back to 0°
+    pros::lcd::set_text(1, "Turn 4: Back to 0");
+    chassis.turnToHeading(0, 2000);
+    
+    // Display final position
+    lemlib::Pose finalPose = chassis.getPose();
+    pros::lcd::set_text(2, ("Final X: " + std::to_string(finalPose.x).substr(0, 6)).c_str());
+    pros::lcd::set_text(3, ("Final Y: " + std::to_string(finalPose.y).substr(0, 6)).c_str());
+    pros::lcd::set_text(4, ("Final Heading: " + std::to_string(finalPose.theta).substr(0, 6)).c_str());
+    pros::lcd::set_text(5, "Should be near (0, 0, 0)");
+    
+    setDriveBrakeMode(pros::E_MOTOR_BRAKE_COAST);
+    pros::delay(5000);
 }
 
-void disabled() {
-    stopDrive();
-    stopIntake();
-    retractScooper();
-}
+// ==================== TEST FUNCTION 5: CONTINUOUS POSITION DISPLAY ====================
 
-void competition_initialize() {
-    // Can add autonomous selector here if needed
+/**
+ * Continuously display position while driving
+ * Useful for checking if odometry is tracking correctly
+ */
+void testContinuousDisplay() {
+    pros::lcd::clear();
+    pros::lcd::set_text(0, "=== POSITION TRACKING ===");
+    pros::lcd::set_text(5, "Press A to exit");
+    
+    chassis.setPose(0, 0, 0);
+    
+    while (!master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
+        lemlib::Pose pose = chassis.getPose();
+        
+        pros::lcd::set_text(1, ("X: " + std::to_string(pose.x).substr(0, 8) + " in").c_str());
+        pros::lcd::set_text(2, ("Y: " + std::to_string(pose.y).substr(0, 8) + " in").c_str());
+        pros::lcd::set_text(3, ("Heading: " + std::to_string(pose.theta).substr(0, 8) + " deg").c_str());
+        pros::lcd::set_text(4, "Drive robot around");
+        
+        pros::delay(50);
+    }
 }
 
 // ==================== AUTONOMOUS ====================
+// ==================== AUTONOMOUS HELPER FUNCTIONS ====================
+
+/**
+ * Autonomous routine for LEFT side starting position
+ * Robot starts in left Park Zone, aligned with 3 blocks near center goals
+ * 
+ * Field Measurements (from game manual):
+ * - Park Zone depth: ~17 inches
+ * - Distance to center blocks: ~20-24 inches from start
+ * - Center Goal distance: ~30-36 inches from start  
+ * - Loader position: Back at ~12-15 inches from start
+ * - Long Goal: ~48 inches from start after 180° turn
+ */
+void autonomousLeft() {
+    pros::lcd::set_text(1, "=== AUTO: LEFT SIDE ===");
+    
+    // STEP 1: Deploy scooper and drive to 3 blocks near center
+    pros::lcd::set_text(2, "1: Deploy & Approach");
+    deployScooper();
+    pros::delay(200);
+    
+    // Drive forward ~22 inches to reach the 3 blocks
+    // Park Zone is 16.86" deep, blocks are ~5" beyond
+    chassis.moveToPoint(0, 22, 3000, {.forwards = true});
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 2: Intake the 3 blocks
+    pros::lcd::set_text(2, "2: Intake 3 blocks");
+    intakeMiddle();  // R1 function
+    pros::delay(1800);  // Give time to intake all 3 blocks
+    stopIntake();
+    pros::delay(100);
+    
+    // STEP 3: Slight rotation RIGHT to align with upper center goal
+    pros::lcd::set_text(2, "3: Align to goal");
+    chassis.turnToHeading(12, 2000);  // Turn 12° right for alignment
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 4: Drive up to center goal and outtake (top center goal)
+    pros::lcd::set_text(2, "4: Score center goal");
+    lemlib::Pose currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x, currentPose.y + 10, 2500, {.forwards = true});  // Drive 10" closer
+    chassis.waitUntilDone();
+    
+    intakeMiddle();  // Middle outtake for top center goal
+    pros::delay(1600);  // Outtake for 1.6 seconds
+    stopIntake();
+    pros::delay(100);
+    
+    // STEP 5: Drive straight back to align with loader
+    pros::lcd::set_text(2, "5: Back to loader");
+    chassis.turnToHeading(0, 2000);  // Face forward again (0°)
+    chassis.waitUntilDone();
+    
+    chassis.moveToPoint(0, 14, 3000, {.forwards = false});  // Back up to loader position
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 6: Turn LEFT slightly to align with loader column
+    pros::lcd::set_text(2, "6: Align loader");
+    chassis.turnToHeading(-8, 2000);  // Turn 8° left for loader alignment
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 7: Drive into loader to get 3 blue blocks
+    pros::lcd::set_text(2, "7: Load 3 blocks");
+    currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x - 4, currentPose.y, 2000, {.forwards = true});  // Drive into loader
+    chassis.waitUntilDone();
+    
+    intakeMiddle();  // Start intake
+    pros::delay(2200);  // Wait for 3 blocks to drop and intake (estimated time)
+    stopIntake();
+    pros::delay(100);
+    
+    // STEP 8: Back out of loader
+    pros::lcd::set_text(2, "8: Exit loader");
+    currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x + 5, currentPose.y, 2000, {.forwards = false});
+    chassis.waitUntilDone();
+    retractScooper();  // Retract scooper
+    pros::delay(100);
+    
+    // STEP 9: Turn 180° to face long goal
+    pros::lcd::set_text(2, "9: Turn to long goal");
+    chassis.turnToHeading(180, 2500);
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 10: Drive to long goal and outtake
+    pros::lcd::set_text(2, "10: Score long goal");
+    currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x, currentPose.y - 12, 3000, {.forwards = true});  // Drive to long goal
+    chassis.waitUntilDone();
+    
+    intakeTop();  // R2 function - outtake top
+    pros::delay(1800);
+    stopIntake();
+    
+    pros::lcd::set_text(2, "=== COMPLETE ===");
+}
+
+/**
+ * Autonomous routine for RIGHT side starting position
+ * Robot starts in right Park Zone, aligned with 3 blocks near center goals
+ * Same measurements as left side, but mirrored
+ */
+void autonomousRight() {
+    pros::lcd::set_text(1, "=== AUTO: RIGHT SIDE ===");
+    
+    // STEP 1: Deploy scooper and drive to 3 blocks near center
+    pros::lcd::set_text(2, "1: Deploy & Approach");
+    deployScooper();
+    pros::delay(200);
+    
+    // Drive forward ~22 inches to reach the 3 blocks
+    chassis.moveToPoint(0, 22, 3000, {.forwards = true});
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 2: Intake the 3 blocks
+    pros::lcd::set_text(2, "2: Intake 3 blocks");
+    intakeMiddle();  // R1 function
+    pros::delay(1800);  // Give time to intake all 3 blocks
+    stopIntake();
+    pros::delay(100);
+    
+    // STEP 3: Slight rotation LEFT to align with lower center goal
+    pros::lcd::set_text(2, "3: Align to goal");
+    chassis.turnToHeading(-12, 2000);  // Turn 12° left (opposite of left side)
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 4: Drive up to center goal and outtake (bottom center goal)
+    pros::lcd::set_text(2, "4: Score center goal");
+    lemlib::Pose currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x, currentPose.y + 10, 2500, {.forwards = true});  // Drive 10" closer
+    chassis.waitUntilDone();
+    
+    intakeBottomStorage();  // L1 function - bottom outtake for lower center goal
+    pros::delay(1600);  // Outtake for 1.6 seconds
+    stopIntake();
+    pros::delay(100);
+    
+    // STEP 5: Drive straight back to align with loader
+    pros::lcd::set_text(2, "5: Back to loader");
+    chassis.turnToHeading(0, 2000);  // Face forward again
+    chassis.waitUntilDone();
+    
+    chassis.moveToPoint(0, 14, 3000, {.forwards = false});  // Back up to loader position
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 6: Turn RIGHT slightly to align with loader column
+    pros::lcd::set_text(2, "6: Align loader");
+    chassis.turnToHeading(8, 2000);  // Turn 8° right (opposite of left side)
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 7: Drive into loader to get 3 blue blocks
+    pros::lcd::set_text(2, "7: Load 3 blocks");
+    currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x + 4, currentPose.y, 2000, {.forwards = true});  // Drive into loader (positive X)
+    chassis.waitUntilDone();
+    
+    intakeMiddle();  // Start intake
+    pros::delay(2200);  // Wait for 3 blocks to drop and intake
+    stopIntake();
+    pros::delay(100);
+    
+    // STEP 8: Back out of loader
+    pros::lcd::set_text(2, "8: Exit loader");
+    currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x - 5, currentPose.y, 2000, {.forwards = false});
+    chassis.waitUntilDone();
+    retractScooper();  // Retract scooper
+    pros::delay(100);
+    
+    // STEP 9: Turn 180° to face long goal
+    pros::lcd::set_text(2, "9: Turn to long goal");
+    chassis.turnToHeading(180, 2500);
+    chassis.waitUntilDone();
+    pros::delay(100);
+    
+    // STEP 10: Drive to long goal and outtake
+    pros::lcd::set_text(2, "10: Score long goal");
+    currentPose = chassis.getPose();
+    chassis.moveToPoint(currentPose.x, currentPose.y - 12, 3000, {.forwards = true});  // Drive to long goal
+    chassis.waitUntilDone();
+    
+    intakeTop();  // R2 function - outtake top
+    pros::delay(1800);
+    stopIntake();
+    
+    pros::lcd::set_text(2, "=== COMPLETE ===");
+}
+
+// ==================== MAIN AUTONOMOUS FUNCTION ====================
 
 void autonomous() {
     autonomousMode = true;
+    setDriveBrakeMode(pros::E_MOTOR_BRAKE_HOLD);  // Use HOLD for precise autonomous
+    
     pros::lcd::clear();
-    pros::lcd::set_text(1, "=== AUTONOMOUS ===");
     
-    // Verify odometry is working
-    lemlib::Pose startPose = chassis.getPose();
-    if (std::isnan(startPose.x) || std::isnan(startPose.y)) {
-        pros::lcd::set_text(2, "ERROR: Odometry NaN");
-        return;
-    }
+    // Set starting position (0, 0, 0)
+    // Robot is in Park Zone, facing forward
+    chassis.setPose(0, 0, 0);
     
-    // ===== EXAMPLE AUTONOMOUS ROUTINE =====
-    // Replace this with your actual autonomous routine
+    // ===== SELECT YOUR STARTING SIDE =====
+    // Uncomment ONE of the following lines:
+    // NOTE: The autonomous routines are based on this: https://www.instagram.com/reel/DUJWBtLkWIO/?igsh=MWtqd2JnbjU4MWhvdg%3D%3D
+    autonomousLeft();   // Use this for LEFT side start
+    // autonomousRight();  // Use this for RIGHT side start
     
-    // Example: Move forward, deploy scooper, intake, move back, score
+    // =====================================
     
-    moveForward(24);           // Move forward 24 inches
-    pros::delay(200);
-    
-    deployScooper();           // Deploy scooper
-    pros::delay(300);
-    
-    autoIntake(1500);          // Intake for 1.5 seconds
-    
-    retractScooper();          // Retract scooper
-    pros::delay(200);
-    
-    moveBackward(12);          // Move back 12 inches
-    pros::delay(200);
-    
-    turnRight(90);             // Turn 90 degrees clockwise
-    pros::delay(200);
-    
-    moveForward(18);           // Move forward to scoring position
-    pros::delay(200);
-    
-    autoOuttakeTop(1000);      // Score through top rollers
-    
-    pros::lcd::set_text(2, "=== COMPLETE ===");
     autonomousMode = false;
+    setDriveBrakeMode(pros::E_MOTOR_BRAKE_COAST);  // Back to coast for driver
 }
+
 
 // ==================== DRIVER CONTROL ====================
 
@@ -620,6 +860,7 @@ void opcontrol() {
             pros::lcd::set_text(2, ("Y: " + std::to_string(pose.y).substr(0, 6)).c_str());
             pros::lcd::set_text(3, ("Heading: " + std::to_string(pose.theta).substr(0, 6)).c_str());
             pros::lcd::set_text(4, scooperDeployed ? "Scooper: DEPLOYED" : "Scooper: RETRACTED");
+            pros::lcd::set_text(5, piston2Deployed ? "Piston2: EXTENDED" : "Piston2: RETRACTED");
             
             pros::delay(50);
         }
@@ -628,70 +869,83 @@ void opcontrol() {
     // Main control loop
     while (true) {
         // ===== DRIVETRAIN CONTROL =====
+        // Axis3 = Left stick Y (forward/backward)
+        // Axis1 = Left stick X (turning)
         int forward = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
-        int strafe = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
         int turn = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X);
         
-        omniDrive(forward, strafe, turn);
+        omniDrive(forward, 0, turn);
         
-        // ===== INTAKE/ELEVATOR CONTROL =====
+        // ===== MOTOR BUTTON CONTROLS =====
         
-        // R1: Intake (bring game piece up)
+        // Check which button is pressed and execute corresponding function
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
-            intakeUp();
+            intakeMiddle();  // R1: Intake middle
         }
-        // R2: Outtake through top
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
-            outtakeTop();
+            intakeTop();  // R2: Intake top (shoot to top)
         }
-        // L1: Outtake through middle
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
-            outtakeMiddle();
+            intakeBottomStorage();  // L1: Intake to bottom storage
         }
-        // L2: Outtake through back rollers (to storage)
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
-            outtakeBack();
+            intakeTopStorage();  // L2: Intake to top storage
         }
-        // Down: Carry down and outtake through bottom
-        else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN)) {
-            outtakeBottom();
-        }
-        // No buttons: Stop intake
+        // No buttons: Stop all motors
         else {
             stopIntake();
         }
         
-        // ===== SCOOPER CONTROL =====
+        // ===== PNEUMATIC CONTROLS =====
         
-        // X: Toggle scooper
-        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_X)) {
-            toggleScooper();
-            master.rumble(".");
+        // Port D (Scooper): X to extend, B to retract
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_X)) {
+            deployScooper();
+        }
+        else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) {
+            retractScooper();
         }
         
-        // ===== UTILITY CONTROLS =====
-        
-        // Y: Reset odometry to (0, 0, 0)
-        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_Y)) {
-            chassis.setPose(0, 0, 0);
-            master.rumble("-");
-            master.print(0, 0, "Pose Reset");
+        // Port A (Piston2): A to extend, Y to retract
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) {
+            extendPiston2();
+        }
+        else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_Y)) {
+            retractPiston2();
+        }
+
+        /*
+        // ===== TEST FUNCTIONS (Remove after testing) =====
+        // Press UP + A together to test encoders
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_UP) && 
+            master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
+            testEncoders();
         }
         
-        // A: Recalibrate encoders
-        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
-            master.rumble("--");
-            master.print(0, 0, "Recalibrating...");
-            
-            verticalEncoder.reset();
-            horizontalEncoder.reset();
-            pros::delay(200);
-            
-            chassis.setPose(0, 0, 0);
-            
-            master.rumble("..");
-            master.print(0, 0, "Calibrated!");
+        // Press UP + B together to test drive straight
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_UP) && 
+            master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
+            testDriveStraight();
         }
+        
+        // Press UP + X together to test turn
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_UP) && 
+            master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_X)) {
+            testTurn90();
+        }
+        
+        // Press UP + Y together to test square pattern
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_UP) && 
+            master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_Y)) {
+            testSquarePattern();
+        }
+        
+        // Press DOWN + A together for continuous position display
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN) && 
+            master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
+            testContinuousDisplay();
+        }
+         */
         
         // Main loop delay
         pros::delay(10);
