@@ -58,12 +58,12 @@ pros::Motor backMiddleMotor(8, pros::MotorGearset::green);    // Port 8
 
 // ==================== PNEUMATICS ====================
 
-pros::adi::DigitalOut scooper('D');  // Port D - Scooper control (X/B buttons)
+pros::adi::DigitalOut scooper('H');  // Port E - Scooper control (X/B buttons)
 
 // ==================== SENSORS ====================
 // Encoders (3-wire ADI ports)
-pros::adi::Encoder verticalEncoder('B', 'C', false);      // Vertical tracking wheel on ports B, C
-pros::adi::Encoder horizontalEncoder('H', 'F', false);    // Horizontal tracking wheel on ports H, F
+pros::adi::Encoder verticalEncoder('D', 'E', false);      // Vertical tracking wheel on ports A, B
+pros::adi::Encoder horizontalEncoder('F', 'G', false);    // Horizontal tracking wheel on ports C, D
 
 // IMU (Smart port) 
 pros::Imu imu(20);  // IMU is on port 20
@@ -236,8 +236,8 @@ lemlib::ControllerSettings angularController(
 );
 
 // Drivetrain configuration for LemLib
-pros::MotorGroup leftMotors({-15, -16, -19});
-pros::MotorGroup rightMotors({1, 2, 3});
+pros::MotorGroup leftMotors({-15, -16, -19}, pros::MotorGearset::blue);
+pros::MotorGroup rightMotors({1, 2, 3}, pros::MotorGearset::blue);
 
 lemlib::Drivetrain drivetrain(
     &leftMotors,
@@ -274,6 +274,42 @@ int constrain(int value, int min, int max) {
     if (value < min) return min;
     if (value > max) return max;
     return value;
+}
+
+// ==================== MANUAL ODOMETRY TASK ==================   (DELETE LATER IF IT CAUSES ISSUES)
+// Manual odometry update task since LemLib 2-wheel is broken
+void odometryTask(void* param) {
+    float lastVertical = 0;
+    float lastHorizontal = 0;
+    float x = 0;
+    float y = 0;
+    float heading = 0;
+    
+    while (true) {
+        // Get current distances
+        float currentVertical = vertical.getDistanceTraveled();
+        float currentHorizontal = horizontal.getDistanceTraveled();
+        
+        // Calculate deltas
+        float deltaVertical = currentVertical - lastVertical;
+        float deltaHorizontal = currentHorizontal - lastHorizontal;
+        
+        // Update heading based on horizontal movement
+        heading += deltaHorizontal / TRACK_WIDTH;
+        
+        // Update position
+        x += deltaVertical * cos(heading);
+        y += deltaVertical * sin(heading);
+        
+        // Update chassis pose
+        chassis.setPose(x, y, heading * 180.0 / 3.14159);
+        
+        // Save for next loop
+        lastVertical = currentVertical;
+        lastHorizontal = currentHorizontal;
+        
+        pros::delay(10);
+    }
 }
 
 // ==================== DRIVETRAIN CONTROL ====================
@@ -333,28 +369,28 @@ void outakeMiddle() {
     frontMiddleMotor.move_velocity(INTAKE_SPEED);
     backMiddleMotor.move_velocity(-INTAKE_SPEED);
     frontTopMotor.move_velocity(-INTAKE_SPEED);
-    backTopMotor.move(0);
+    backTopMotor.move_velocity(0);
 }
 
 void outakeTop() {
     frontMiddleMotor.move_velocity(INTAKE_SPEED);
     backMiddleMotor.move_velocity(-INTAKE_SPEED);
     frontTopMotor.move_velocity(INTAKE_SPEED);
-    backTopMotor.move(-INTAKE_SPEED);
+    backTopMotor.move_velocity(-INTAKE_SPEED);
 }
 
 void outakeBottom() {
     frontMiddleMotor.move_velocity(-INTAKE_SPEED);
     backMiddleMotor.move_velocity(INTAKE_SPEED);
     frontTopMotor.move_velocity(-INTAKE_SPEED);
-    backTopMotor.move(INTAKE_SPEED);
+    backTopMotor.move_velocity(INTAKE_SPEED);
 }
 
 void outakeStorage() {
     frontMiddleMotor.move_velocity(INTAKE_SPEED);
     backMiddleMotor.move_velocity(-INTAKE_SPEED);
-    frontTopMotor.move(0);
-    backTopMotor.move(0);
+    frontTopMotor.move_velocity(0);
+    backTopMotor.move_velocity(0);
 }
 
 void motor6CCW() {
@@ -455,6 +491,7 @@ void initialize() {
     
     // Initialize chassis (starts odometry tracking)
     pros::lcd::set_text(3, "Starting odometry...");
+    //pros::Task odomTask(odometryTask, nullptr, "Odometry");            // IMPORTANT: Delete later if LemLib 2-wheel odometry is fixed
     chassis.calibrate();
     
     // Startup movement for backTopMotor
@@ -481,13 +518,29 @@ void testEncoders() {
     pros::lcd::set_text(0, "=== ENCODER TEST ===");
     
     for (int i = 0; i < TEST_ENCODER_CYCLES; i++) {
+        printf("DEBUG TO SEE IF ENCOER GOES IN FOR LOOP");
         int verticalValue = verticalEncoder.get_value();
         int horizontalValue = horizontalEncoder.get_value();
+        printf("DEBUG VERTICAL: %d, HORIZONTAL: %d", verticalValue, horizontalValue);
         double imuHeading = imu.get_rotation();
-        
-        pros::lcd::set_text(1, ("Vertical: " + std::to_string(verticalValue)).c_str());
-        pros::lcd::set_text(2, ("Horizontal: " + std::to_string(horizontalValue)).c_str());
-        pros::lcd::set_text(3, ("IMU: " + std::to_string(imuHeading).substr(0, 6)).c_str());
+        printf("DEBUG IMU HEADING: %.2f", imuHeading);
+
+        /*
+        // Create buffers to hold the formatted text
+        char vertBuf[32];
+        char horizBuf[32];
+        char imuBuf[32];
+
+        // Safely format the strings
+        snprintf(vertBuf, sizeof(vertBuf), "Vertical: %d", verticalValue);
+        snprintf(horizBuf, sizeof(horizBuf), "Horizontal: %d", horizontalValue);
+        snprintf(imuBuf, sizeof(imuBuf), "IMU: %.2f", imuHeading);
+
+        // Update the display
+        pros::lcd::set_text(1, vertBuf);
+        pros::lcd::set_text(2, horizBuf);
+        pros::lcd::set_text(3, imuBuf);
+        */
         pros::lcd::set_text(4, "Push robot to test!");
         pros::lcd::set_text(5, "Press A to exit");
         
@@ -655,65 +708,102 @@ void measureDrift() {
         pros::delay(10);
     }
     
+    // Reset encoders
     verticalEncoder.reset();
     horizontalEncoder.reset();
+    pros::delay(100);
     
     double startVertical = verticalEncoder.get_value();
     
     pros::lcd::set_text(2, "Driving...");
+    printf("Starting drift test...\n");
     
-    while (fabs((verticalEncoder.get_value() - startVertical) / TRACKING_WHEEL_DISTANCE) < DRIFT_TEST_DISTANCE) {
-        leftFront.move(DRIFT_TEST_MOTOR_SPEED);
-        leftMiddle.move(DRIFT_TEST_MOTOR_SPEED);
-        leftBack.move(DRIFT_TEST_MOTOR_SPEED);
-        rightFront.move(DRIFT_TEST_MOTOR_SPEED);
-        rightMiddle.move(DRIFT_TEST_MOTOR_SPEED);
-        rightBack.move(DRIFT_TEST_MOTOR_SPEED);
+    // Drive straight forward using tank drive
+    // Target: drive DRIFT_TEST_DISTANCE inches forward
+    const double DRIFT_TEST_DISTANCE = 24.0;  // inches to drive
+    const int DRIFT_TEST_MOTOR_SPEED = 100;   // motor velocity
+    const int DRIFT_TEST_SETTLE_TIME = 500;   // ms to settle
+    
+    // Calculate encoder ticks per inch for your tracking wheels
+    // Assuming 2.75" diameter wheels: circumference = π * 2.75 = 8.639 inches
+    // 360 ticks per revolution (standard encoder)
+    const double TICKS_PER_INCH = 360.0 / (3.14159 * 2.75);  // ~41.67 ticks/inch
+    
+    double targetTicks = DRIFT_TEST_DISTANCE * TICKS_PER_INCH;
+    
+    while (fabs(verticalEncoder.get_value() - startVertical) < targetTicks) {
+        // Tank drive - both sides same speed for straight
+        leftMotors.move_velocity(DRIFT_TEST_MOTOR_SPEED);
+        rightMotors.move_velocity(DRIFT_TEST_MOTOR_SPEED);
+        
+        // Debug output
+        if ((pros::millis() % 500) == 0) {  // Every 500ms
+            printf("Vertical: %d, Horizontal: %d\n", 
+                   verticalEncoder.get_value(), 
+                   horizontalEncoder.get_value());
+        }
+        
         pros::delay(10);
     }
     
-    leftFront.move(0);
-    leftMiddle.move(0);
-    leftBack.move(0);
-    rightFront.move(0);
-    rightMiddle.move(0);
-    rightBack.move(0);
+    // Stop motors
+    leftMotors.move_velocity(0);
+    rightMotors.move_velocity(0);
     
+    pros::lcd::set_text(2, "Settling...");
     pros::delay(DRIFT_TEST_SETTLE_TIME);
     
-    double verticalDistance = verticalEncoder.get_value() / TRACKING_WHEEL_DISTANCE;
-    double horizontalDistance = horizontalEncoder.get_value() / TRACKING_WHEEL_DISTANCE;
+    // Read final encoder values
+    double verticalTicks = verticalEncoder.get_value() - startVertical;
+    double horizontalTicks = horizontalEncoder.get_value();
     
-    double currentDrift = HORIZONTAL_DRIFT;
-    double driftRatio = horizontalDistance / verticalDistance;
-    double correctionNeeded = driftRatio * 100.0;
-    double newDrift = currentDrift + correctionNeeded;
+    // Convert to inches
+    double verticalDistance = verticalTicks / TICKS_PER_INCH;
+    double horizontalDistance = horizontalTicks / TICKS_PER_INCH;
     
+    // Calculate drift
+    double driftRatio = fabs(horizontalDistance / verticalDistance);
+    
+    // Get current drift multiplier from your config
+    const double CURRENT_DRIFT = 2.0;  // Your current value in drivetrain config
+    
+    // Calculate recommended new value
+    // If robot drifted right (positive horizontal), increase drift multiplier
+    // If robot drifted left (negative horizontal), decrease drift multiplier
+    double newDrift = CURRENT_DRIFT * (1.0 + driftRatio);
+    
+    // Clamp to reasonable range
     if (newDrift < 0.5) newDrift = 0.5;
     if (newDrift > 5.0) newDrift = 5.0;
     
-    pros::lcd::clear();
-    pros::lcd::set_text(0, "=== RESULTS ===");
-    pros::lcd::set_text(1, ("Forward: " + std::to_string(verticalDistance).substr(0, 5)).c_str());
-    pros::lcd::set_text(2, ("Sideways: " + std::to_string(horizontalDistance).substr(0, 5)).c_str());
-    pros::lcd::set_text(3, ("Current: " + std::to_string(currentDrift).substr(0, 4)).c_str());
-    pros::lcd::set_text(4, "RECOMMENDED:");
-    pros::lcd::set_text(5, ("HORIZONTAL_DRIFT = " + std::to_string(newDrift).substr(0, 4)).c_str());
+    // Display results
+    pros::lcd::clear();     
+    pros::lcd::set_text(0, "=== DRIFT RESULTS ===");
+    pros::lcd::set_text(1, ("Forward: " + std::to_string(verticalDistance).substr(0, 5) + " in").c_str());
+    pros::lcd::set_text(2, ("Sideways: " + std::to_string(horizontalDistance).substr(0, 5) + " in").c_str());
+    pros::lcd::set_text(3, ("Ratio: " + std::to_string(driftRatio).substr(0, 5)).c_str());
+    pros::lcd::set_text(4, ("Current: " + std::to_string(CURRENT_DRIFT).substr(0, 4)).c_str());
+    pros::lcd::set_text(5, "RECOMMENDED:");
+    pros::lcd::set_text(6, ("Drift = " + std::to_string(newDrift).substr(0, 4)).c_str());
     
-    printf("\n=== DRIFT RESULTS ===\n");
-    printf("Target: %.2f in\n", DRIFT_TEST_DISTANCE);
-    printf("Forward: %.2f in\n", verticalDistance);
-    printf("Sideways: %.2f in\n", horizontalDistance);
+    // Terminal output (more detailed)
+    printf("\n=== DRIFT CALIBRATION RESULTS ===\n");
+    printf("Target distance: %.2f inches\n", DRIFT_TEST_DISTANCE);
+    printf("Actual forward: %.2f inches\n", verticalDistance);
+    printf("Sideways drift: %.2f inches\n", horizontalDistance);
     printf("Drift ratio: %.4f\n", driftRatio);
-    printf("Current: %.2f\n", currentDrift);
-    printf("\nRECOMMENDED:\n");
-    printf("const double HORIZONTAL_DRIFT = %.2f;\n", newDrift);
-    printf("=====================\n\n");
+    printf("Current multiplier: %.2f\n", CURRENT_DRIFT);
+    printf("\nRECOMMENDED CHANGE:\n");
+    printf("In drivetrain config, change:\n");
+    printf("  2  →  %.2f\n", newDrift);
+    printf("==================================\n\n");
     
     pros::lcd::set_text(7, "Press A to continue");
     while (!master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
         pros::delay(10);
     }
+    
+    pros::lcd::clear();
 }
 
 // ==================== AUTONOMOUS ROUTINES ====================
@@ -931,13 +1021,18 @@ void autonomous() {
     setDriveBrakeMode(pros::E_MOTOR_BRAKE_HOLD);
     
     pros::lcd::clear();
+    
+    // Reset encoders before setting pose to prevent overflow
+    verticalEncoder.reset();
+    horizontalEncoder.reset();
+    pros::delay(50);  // Small delay to ensure reset completes
+    
     chassis.setPose(0, 0, 0);
     
     // Uncomment ONE:
-    //autonomousLeft();
+    autonomousLeft();
     //autonomousRight();
-    measureDrift();
-    
+
     autonomousMode = false;
     setDriveBrakeMode(pros::E_MOTOR_BRAKE_COAST);
 }
@@ -947,22 +1042,36 @@ void autonomous() {
 void opcontrol() {
     autonomousMode = false;
     setDriveBrakeMode(pros::E_MOTOR_BRAKE_COAST);
-
-    measureJoystickDeadzone();
     
+    // Enhanced display task with encoder debugging
     pros::Task displayTask([&]() {
         while (true) {
+            int vertVal = verticalEncoder.get_value();
+            int horizVal = horizontalEncoder.get_value();
             lemlib::Pose pose = chassis.getPose();
-            
-            pros::lcd::set_text(0, "=== DRIVER ===");
-            pros::lcd::set_text(1, ("X: " + std::to_string(pose.x).substr(0, 6)).c_str());
-            pros::lcd::set_text(2, ("Y: " + std::to_string(pose.y).substr(0, 6)).c_str());
-            pros::lcd::set_text(3, ("θ: " + std::to_string(pose.theta).substr(0, 6)).c_str());
-            printf("Pose - X: %.2f, Y: %.2f, θ: %.2f\n", pose.x, pose.y, pose.theta);
-            printf("IMU: %.2f\n", imu.get_heading());
-            pros::lcd::set_text(4, scooperDeployed ? "Scooper: OUT" : "Scooper: IN");
-            
-            pros::delay(DISPLAY_UPDATE_INTERVAL);
+
+            if (std::isnan(pose.x) || std::isnan(pose.y) || std::isnan(pose.theta)) {
+                pros::lcd::set_text(0, "=== ERROR ===");
+                pros::lcd::set_text(1, "Position NaN!");
+                pros::lcd::set_text(2, "EncV: " + std::to_string(vertVal));
+                pros::lcd::set_text(3, "EncH: " + std::to_string(horizVal));
+                // Also print to terminal
+                printf("ERROR: NaN detected! EncV: %d, EncH: %d\n", vertVal, horizVal);
+            } else {
+                pros::lcd::set_text(0, "=== DRIVER ===");
+                pros::lcd::set_text(1, "X: " + std::to_string(pose.x).substr(0, 6));
+                pros::lcd::set_text(2, "Y: " + std::to_string(pose.y).substr(0, 6));
+                pros::lcd::set_text(3, "H: " + std::to_string(pose.theta).substr(0, 6));
+                pros::lcd::set_text(4, "EncV: " + std::to_string(vertVal));
+                pros::lcd::set_text(5, "EncH: " + std::to_string(horizVal));
+                pros::lcd::set_text(6, scooperDeployed ? "Scooper: OUT" : "Scooper: IN");
+                
+                // Print to terminal
+                printf("Pose - X: %.2f, Y: %.2f, θ: %.2f | EncV: %d, EncH: %d\n", 
+                       pose.x, pose.y, pose.theta, vertVal, horizVal);
+            }
+
+            pros::delay(100);  // Update every 100ms
         }
     });
     
@@ -1002,13 +1111,16 @@ void opcontrol() {
         
         // Manual controls for specific motors
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_A)) {
+            //testEncoders();                 // TEMPORARY ----------------------------------------------------------------------
             motor6CCW();
         }
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_Y)) {
+            //measureDrift();                 // TEMPORARY ----------------------------------------------------------------------
             motor6CW();
         }
         
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_LEFT)) {
+            //autonomous();                 // TEMPORARY ----------------------------------------------------------------------
             motor8CW();
         }
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_RIGHT)) {
@@ -1021,22 +1133,6 @@ void opcontrol() {
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN)) {
             motor10CW();
         }
-        
-        /*
-        // Test functions (uncomment to enable)
-        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_UP)) {
-            testEncoders();
-        }
-        else if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_DOWN)) {
-            testDriveStraight();
-        }
-        else if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_LEFT)) {
-            testSquarePattern();
-        }
-        else if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_RIGHT)) {
-            testTurn90();
-        }
-        */
         
         pros::delay(MAIN_LOOP_DELAY);
     }
